@@ -1201,17 +1201,22 @@ async function init() {
     updateSheetStatus(true);
     setLoadingMsg('Carregando dados...');
     try {
-      // Timeout de 4s — resolve (não rejeita) para garantir que o sistema sempre avance
+      // Timeout de 4s — dados críticos para o login (sem ponto, que é grande)
       const timeoutPromise = new Promise(res => setTimeout(() => res('timeout'), 4000));
       const syncPromise = Promise.all([
         loadSheetData('colaboradores'),
         loadSheetData('feedbacks'),
         loadSheetData('acoes'),
         loadSheetData('usuarios'),
-        loadSheetData('ponto'),
       ]).then(() => 'ok').catch(() => 'error');
       const result = await Promise.race([syncPromise, timeoutPromise]);
       setLoadingMsg(result === 'ok' ? 'Pronto!' : 'Usando dados locais...');
+      // Ponto carrega em background após os dados críticos (é o maior, não bloqueia o login)
+      if (result === 'ok') {
+        loadSheetData('ponto').then(() => {
+          localStorage.setItem('ops_ponto', JSON.stringify(APP.pontoData));
+        }).catch(() => {});
+      }
     } catch(e) {
       console.warn('Pre-login sync error:', e.message);
       setLoadingMsg('Usando dados locais...');
@@ -2598,7 +2603,16 @@ function parseHHMM(str) {
   return parseInt(m[1]) + parseInt(m[2])/60;
 }
 
-function limparPonto() { APP.pontoData = []; saveToStorage(); navTo('ponto'); }
+function limparPonto() {
+  APP.pontoData = [];
+  saveToStorage();
+  if (APP.sheetUrl) {
+    sheetsPost({ action: 'replace_all', sheet: 'ponto',
+      headers: ['Nome','Data','DataBR','DiaSemana','Entrada1','Saida1','Entrada2','Saida2','Horas','Credito','Debito','Saldo','Status'],
+      rows: [] });
+  }
+  navTo('ponto');
+}
 
 // ======= RELATÓRIOS =======
 function renderRelatorios() {
@@ -5107,7 +5121,8 @@ async function loadSheetData(sheetName) {
   }
 
   else if (sheetName === 'ponto') {
-    // Helper: clean Sheets ISO datetime → just the time HH:MM
+    // Se Sheets vier vazio (aba ponto sem dados), mantém dados locais — não apaga
+    if (!rows.length) return;
     function cleanTime(v) {
       if (!v) return '';
       const s = String(v);
@@ -5250,11 +5265,14 @@ function iniciarAutoSync() {
     if (!APP.logado) return;
     try {
       const prevFbCount = APP.feedbacks.length;
+      await loadSheetData('colaboradores');
       await loadSheetData('acoes');
       await loadSheetData('feedbacks');
       await loadSheetData('notificacoes');
       updateBadges();
       const page = document.querySelector('.nav-item.active')?.dataset?.page;
+      // Sincroniza ponto quando a aba estiver aberta (evita carregar 2500 linhas a cada 20s em background)
+      if (page === 'ponto') { await loadSheetData('ponto'); renderPage('ponto'); }
       // Only re-render if feedbacks changed (new ones arrived)
       const newFbCount = APP.feedbacks.length;
       if (newFbCount > prevFbCount) {
