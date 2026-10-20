@@ -4902,21 +4902,11 @@ async function excluirColaborador(id, nome) {
   // 3. Deleta do Sheets via action 'delete' (por ID, linha a linha — mais confiável que replace_all)
   if (APP.sheetUrl) {
     try {
-      // Helper: tenta com CORS, cai para no-cors se bloquear
-      const deleteRow = async (sheet, rowId) => {
-        const payload = JSON.stringify({ action: 'delete', sheet, id: rowId });
-        try {
-          await fetch(APP.sheetUrl, {
-            method: 'POST', mode: 'cors',
-            headers: { 'Content-Type': 'application/json' }, body: payload
-          });
-        } catch(e) {
-          // CORS bloqueado — usa no-cors (sem confirmação, mas lista negra protege)
-          await fetch(APP.sheetUrl, {
-            method: 'POST', mode: 'no-cors',
-            headers: { 'Content-Type': 'application/json' }, body: payload
-          });
-        }
+      // Delete via GET com parâmetros na URL — único método confiável com no-cors
+      // (POST com no-cors ignora o body; GET com params sempre funciona)
+      const deleteRow = (sheet, rowId) => {
+        const url = `${APP.sheetUrl}?action=delete&sheet=${encodeURIComponent(sheet)}&id=${encodeURIComponent(rowId)}`;
+        return fetch(url, { method: 'GET', mode: 'no-cors' }).catch(() => {});
       };
       await deleteRow('colaboradores', id);
       for (const fb of fbsRemovidos) {
