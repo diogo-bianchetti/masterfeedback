@@ -4887,10 +4887,11 @@ async function excluirColaborador(id, nome) {
   const fbsRemovidos = APP.feedbacks.filter(x => x.colaboradorId === id);
   APP.feedbacks = APP.feedbacks.filter(x => x.colaboradorId !== id);
 
-  // 2. Salva na lista negra (bloqueia auto-sync de reverter)
+  // 2. Lista negra PERMANENTE — bloqueia auto-sync de reverter para sempre
   try {
     const excluidos = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
-    excluidos.push({ id, ts: Date.now() });
+    const ids = excluidos.map(e => typeof e === 'string' ? e : e.id);
+    if (!ids.includes(id)) excluidos.push(id);
     localStorage.setItem('ops_excluidos_colabs', JSON.stringify(excluidos));
   } catch(e) {}
 
@@ -4899,23 +4900,14 @@ async function excluirColaborador(id, nome) {
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
   showToast(`${nome} removido`, 'success');
 
-  // 3. Deleta do Sheets via action 'delete' (por ID, linha a linha — mais confiável que replace_all)
+  // 3. Tenta deletar do Sheets (best-effort — lista negra garante mesmo se falhar)
   if (APP.sheetUrl) {
-    try {
-      // Delete via GET com parâmetros na URL — único método confiável com no-cors
-      // (POST com no-cors ignora o body; GET com params sempre funciona)
-      const deleteRow = (sheet, rowId) => {
-        const url = `${APP.sheetUrl}?action=delete&sheet=${encodeURIComponent(sheet)}&id=${encodeURIComponent(rowId)}`;
-        return fetch(url, { method: 'GET', mode: 'no-cors' }).catch(() => {});
-      };
-      await deleteRow('colaboradores', id);
-      for (const fb of fbsRemovidos) {
-        await deleteRow('feedbacks', fb.id);
-      }
-    } catch(e) {
-      console.warn('Erro ao excluir do Sheets:', e);
-      // Lista negra garante que mesmo sem confirmação o colaborador não volta
-    }
+    const tryDelete = (sheet, rowId) => {
+      const url = `${APP.sheetUrl}?action=delete&sheet=${encodeURIComponent(sheet)}&id=${encodeURIComponent(rowId)}`;
+      fetch(url, { mode: 'no-cors' }).catch(() => {});
+    };
+    tryDelete('colaboradores', id);
+    fbsRemovidos.forEach(fb => tryDelete('feedbacks', fb.id));
   }
 }
 
@@ -5049,13 +5041,12 @@ async function loadSheetData(sheetName) {
   const rows = data.slice(1); // skip header row
 
   if (sheetName === 'colaboradores') {
-    // Filtra IDs excluídos recentemente (evita auto-sync reverter exclusão pendente no Sheets)
+    // Filtra IDs excluídos permanentemente (lista negra — persiste até limpeza manual)
     const _excluidos = (() => {
       try {
         const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
-        const validos = lista.filter(e => Date.now() - e.ts < 86400000); // 24h
-        if (validos.length !== lista.length) localStorage.setItem('ops_excluidos_colabs', JSON.stringify(validos));
-        return new Set(validos.map(e => e.id));
+        // Suporte a formato antigo {id, ts} e novo formato string
+        return new Set(lista.map(e => typeof e === 'string' ? e : e.id));
       } catch(e) { return new Set(); }
     })();
     APP.colaboradores = rows.map(r => ({
