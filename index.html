@@ -4880,14 +4880,15 @@ function editarColaborador(id) {
 }
 
 async function excluirColaborador(id, nome) {
-  if (!confirm(`Excluir "${nome}"?\n\nOs feedbacks deste colaborador também serão removidos.`)) return;
+  if (!confirm(`Excluir "${nome}"?\n\nTodos os registros deste colaborador serão removidos (feedbacks, ações e notificações).`)) return;
 
-  // 1. Remove localmente
-  APP.colaboradores = APP.colaboradores.filter(x => x.id !== id);
-  const fbsRemovidos = APP.feedbacks.filter(x => x.colaboradorId === id);
-  APP.feedbacks = APP.feedbacks.filter(x => x.colaboradorId !== id);
+  // 1. Remove de todas as abas localmente
+  APP.colaboradores  = APP.colaboradores.filter(x => x.id !== id);
+  APP.feedbacks      = APP.feedbacks.filter(x => x.colaboradorId !== id);
+  APP.acoes          = (APP.acoes || []).filter(x => x.colaboradorId !== id);
+  APP.notificacoes   = (APP.notificacoes || []).filter(x => x.colaboradorId !== id);
 
-  // 2. Lista negra PERMANENTE — bloqueia auto-sync de reverter para sempre
+  // 2. Lista negra permanente — bloqueia qualquer sync de reverter
   try {
     const excluidos = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
     const ids = excluidos.map(e => typeof e === 'string' ? e : e.id);
@@ -4900,14 +4901,34 @@ async function excluirColaborador(id, nome) {
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
   showToast(`${nome} removido`, 'success');
 
-  // 3. Tenta deletar do Sheets (best-effort — lista negra garante mesmo se falhar)
+  // 3. Sincroniza TODAS as abas com Sheets via replace_all
   if (APP.sheetUrl) {
-    const tryDelete = (sheet, rowId) => {
-      const url = `${APP.sheetUrl}?action=delete&sheet=${encodeURIComponent(sheet)}&id=${encodeURIComponent(rowId)}`;
-      fetch(url, { mode: 'no-cors' }).catch(() => {});
-    };
-    tryDelete('colaboradores', id);
-    fbsRemovidos.forEach(fb => tryDelete('feedbacks', fb.id));
+    const colRows = APP.colaboradores.map(c => [
+      c.id, c.nome, c.funcao, c.lider, c.admissao||'', c.turno||'',
+      c.foto||'', c.obs||'', c.senha||'', c.telefone||'', c.email||'', String(c.trocarSenha||false)
+    ]);
+    const fbRows = APP.feedbacks.map(f => [
+      f.id, f.colaboradorId, f.tipo, f.titulo, f.descricao||'',
+      'DATA:'+(f.data||''), f.satisfacao||'', f.acao||'', f.prazo||'', f.registradoPor||''
+    ]);
+    const acRows = (APP.acoes||[]).map(a => [
+      a.id, a.feedbackId||'', a.colaboradorId||'', a.colaboradorNome||'', a.acao||'',
+      a.prazo||'', a.responsavel||'', a.dataConclusao||'', a.status||'',
+      a.origem||'', a.criadoEm||'', a.criadoPor||''
+    ]);
+    const ntRows = (APP.notificacoes||[]).map(n => [
+      n.id, n.msg||'', n.tipo||'', n.colaboradorId||'', n.data||'', n.lida||false, n.destinatarios||'todos'
+    ]);
+    // Envia sequencialmente — no-cors funciona para replace_all (sem header Content-Type problemático)
+    await sheetsPost({ action:'replace_all', sheet:'colaboradores',
+      headers:['ID','Nome','Funcao','Lider','Admissao','Turno','Foto','Obs','Senha','Telefone','Email','TrocarSenha'], rows:colRows });
+    await sheetsPost({ action:'replace_all', sheet:'feedbacks',
+      headers:['ID','ColaboradorID','Tipo','Titulo','Descricao','Data','Satisfacao','Acao','Prazo','RegistradoPor'], rows:fbRows });
+    await sheetsPost({ action:'replace_all', sheet:'acoes',
+      headers:['ID','FeedbackID','ColaboradorID','ColaboradorNome','Acao','Prazo','Responsavel','DataConclusao','Status','Origem','CriadoEm','CriadoPor'], rows:acRows });
+    await sheetsPost({ action:'replace_all', sheet:'notificacoes',
+      headers:['ID','Msg','Tipo','ColaboradorID','Data','Lida','Destinatarios'], rows:ntRows });
+    showToast(`${nome} removido do servidor ✓`, 'success');
   }
 }
 
@@ -4916,10 +4937,12 @@ async function excluirColaborador(id, nome) {
 async function sheetsPost(payload) {
   if (!APP.sheetUrl) return false;
   try {
+    // Sem Content-Type header — no-cors só permite headers simples
+    // text/plain é aceito sem preflight e o Apps Script lê via e.postData.contents
     await fetch(APP.sheetUrl, {
       method: 'POST', mode: 'no-cors',
       body: JSON.stringify(payload),
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'text/plain' }
     });
     return true;
   } catch(e) { console.warn('Sheets POST error', e); return false; }
