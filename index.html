@@ -4882,7 +4882,12 @@ function editarColaborador(id) {
 async function excluirColaborador(id, nome) {
   if (!confirm(`Excluir "${nome}"?\n\nTodos os registros deste colaborador serão removidos (feedbacks, ações e notificações).`)) return;
 
-  // 1. Remove de todas as abas localmente
+  // 1. Captura registros a excluir antes de filtrar (para deletar do Sheets depois)
+  const fbsExcluidos     = APP.feedbacks.filter(x => x.colaboradorId === id);
+  const acoesExcluidas   = (APP.acoes||[]).filter(x => x.colaboradorId === id);
+  const notifsExcluidas  = (APP.notificacoes||[]).filter(x => x.colaboradorId === id);
+
+  // Remove de todas as abas localmente
   APP.colaboradores  = APP.colaboradores.filter(x => x.id !== id);
   APP.feedbacks      = APP.feedbacks.filter(x => x.colaboradorId !== id);
   APP.acoes          = (APP.acoes || []).filter(x => x.colaboradorId !== id);
@@ -4901,34 +4906,23 @@ async function excluirColaborador(id, nome) {
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
   showToast(`${nome} removido`, 'success');
 
-  // 3. Sincroniza TODAS as abas com Sheets via replace_all
+  // 3. Deleta do Sheets via GET — único método que não recebe redirect 302
   if (APP.sheetUrl) {
-    const colRows = APP.colaboradores.map(c => [
-      c.id, c.nome, c.funcao, c.lider, c.admissao||'', c.turno||'',
-      c.foto||'', c.obs||'', c.senha||'', c.telefone||'', c.email||'', String(c.trocarSenha||false)
-    ]);
-    const fbRows = APP.feedbacks.map(f => [
-      f.id, f.colaboradorId, f.tipo, f.titulo, f.descricao||'',
-      'DATA:'+(f.data||''), f.satisfacao||'', f.acao||'', f.prazo||'', f.registradoPor||''
-    ]);
-    const acRows = (APP.acoes||[]).map(a => [
-      a.id, a.feedbackId||'', a.colaboradorId||'', a.colaboradorNome||'', a.acao||'',
-      a.prazo||'', a.responsavel||'', a.dataConclusao||'', a.status||'',
-      a.origem||'', a.criadoEm||'', a.criadoPor||''
-    ]);
-    const ntRows = (APP.notificacoes||[]).map(n => [
-      n.id, n.msg||'', n.tipo||'', n.colaboradorId||'', n.data||'', n.lida||false, n.destinatarios||'todos'
-    ]);
-    // Envia sequencialmente — no-cors funciona para replace_all (sem header Content-Type problemático)
-    await sheetsPost({ action:'replace_all', sheet:'colaboradores',
-      headers:['ID','Nome','Funcao','Lider','Admissao','Turno','Foto','Obs','Senha','Telefone','Email','TrocarSenha'], rows:colRows });
-    await sheetsPost({ action:'replace_all', sheet:'feedbacks',
-      headers:['ID','ColaboradorID','Tipo','Titulo','Descricao','Data','Satisfacao','Acao','Prazo','RegistradoPor'], rows:fbRows });
-    await sheetsPost({ action:'replace_all', sheet:'acoes',
-      headers:['ID','FeedbackID','ColaboradorID','ColaboradorNome','Acao','Prazo','Responsavel','DataConclusao','Status','Origem','CriadoEm','CriadoPor'], rows:acRows });
-    await sheetsPost({ action:'replace_all', sheet:'notificacoes',
-      headers:['ID','Msg','Tipo','ColaboradorID','Data','Lida','Destinatarios'], rows:ntRows });
-    showToast(`${nome} removido do servidor ✓`, 'success');
+    const delGet = (sheet, rowId) => {
+      const url = APP.sheetUrl
+        + '?action=delete'
+        + '&sheet=' + encodeURIComponent(sheet)
+        + '&id='    + encodeURIComponent(rowId);
+      return fetch(url, { mode: 'no-cors' }).catch(() => {});
+    };
+    // Deleta colaborador
+    await delGet('colaboradores', id);
+    // Deleta feedbacks do colaborador
+    for (const fb of fbsExcluidos) await delGet('feedbacks', fb.id);
+    // Deleta ações do colaborador
+    for (const ac of acoesExcluidas) await delGet('acoes', ac.id);
+    // Deleta notificações do colaborador
+    for (const nt of notifsExcluidas) await delGet('notificacoes', nt.id);
   }
 }
 
