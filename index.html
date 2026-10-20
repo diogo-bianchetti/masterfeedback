@@ -4879,14 +4879,54 @@ function editarColaborador(id) {
   document.getElementById('modal-colaborador').classList.add('open');
 }
 
-function excluirColaborador(id, nome) {
+async function excluirColaborador(id, nome) {
   if (!confirm(`Excluir "${nome}"?\n\nOs feedbacks deste colaborador também serão removidos.`)) return;
+
+  // 1. Remove localmente
   APP.colaboradores = APP.colaboradores.filter(x => x.id !== id);
+  const fbsRemovidos = APP.feedbacks.filter(x => x.colaboradorId === id);
   APP.feedbacks = APP.feedbacks.filter(x => x.colaboradorId !== id);
+
+  // 2. Salva na lista negra (bloqueia auto-sync de reverter)
+  try {
+    const excluidos = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+    excluidos.push({ id, ts: Date.now() });
+    localStorage.setItem('ops_excluidos_colabs', JSON.stringify(excluidos));
+  } catch(e) {}
+
   saveToStorage();
   updateBadges();
-  showToast(`${nome} removido`, 'success');
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
+  showToast(`${nome} removido`, 'success');
+
+  // 3. Deleta do Sheets via action 'delete' (por ID, linha a linha — mais confiável que replace_all)
+  if (APP.sheetUrl) {
+    try {
+      // Helper: tenta com CORS, cai para no-cors se bloquear
+      const deleteRow = async (sheet, rowId) => {
+        const payload = JSON.stringify({ action: 'delete', sheet, id: rowId });
+        try {
+          await fetch(APP.sheetUrl, {
+            method: 'POST', mode: 'cors',
+            headers: { 'Content-Type': 'application/json' }, body: payload
+          });
+        } catch(e) {
+          // CORS bloqueado — usa no-cors (sem confirmação, mas lista negra protege)
+          await fetch(APP.sheetUrl, {
+            method: 'POST', mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' }, body: payload
+          });
+        }
+      };
+      await deleteRow('colaboradores', id);
+      for (const fb of fbsRemovidos) {
+        await deleteRow('feedbacks', fb.id);
+      }
+    } catch(e) {
+      console.warn('Erro ao excluir do Sheets:', e);
+      // Lista negra garante que mesmo sem confirmação o colaborador não volta
+    }
+  }
 }
 
 // ======= SHEETS SYNC =======
@@ -4983,21 +5023,13 @@ async function syncAllFromSheet() {
   if (!APP.sheetUrl) return;
   showSyncIndicator('syncing');
   try {
-    // Colaboradores sincronizam apenas se não houver exclusões pendentes recentes
-    const _temExclusaoPendente = (() => {
-      try {
-        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
-        return lista.some(e => Date.now() - e.ts < 30000); // 30s após exclusão, não sincroniza
-      } catch(e) { return false; }
-    })();
-    const syncTasks = [
+    await Promise.all([
+      loadSheetData('colaboradores'),
       loadSheetData('feedbacks'),
       loadSheetData('acoes'),
       loadSheetData('usuarios'),
       loadSheetData('ponto'),
-    ];
-    if (!_temExclusaoPendente) syncTasks.push(loadSheetData('colaboradores'));
-    await Promise.all(syncTasks);
+    ]);
     showSyncIndicator('ok');
     updateBadges();
     // Re-render current page with fresh data
@@ -5027,6 +5059,15 @@ async function loadSheetData(sheetName) {
   const rows = data.slice(1); // skip header row
 
   if (sheetName === 'colaboradores') {
+    // Filtra IDs excluídos recentemente (evita auto-sync reverter exclusão pendente no Sheets)
+    const _excluidos = (() => {
+      try {
+        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+        const validos = lista.filter(e => Date.now() - e.ts < 86400000); // 24h
+        if (validos.length !== lista.length) localStorage.setItem('ops_excluidos_colabs', JSON.stringify(validos));
+        return new Set(validos.map(e => e.id));
+      } catch(e) { return new Set(); }
+    })();
     APP.colaboradores = rows.map(r => ({
       id:          String(r[0]||''),
       nome:        String(r[1]||''),
@@ -5040,7 +5081,7 @@ async function loadSheetData(sheetName) {
       telefone:    r[9] ? String(r[9]) : null,
       email:       r[10] ? String(r[10]) : null,
       trocarSenha: String(r[11]||'') === 'true',
-    })).filter(c => c.id && c.nome);
+    })).filter(c => c.id && c.nome && !_excluidos.has(c.id));
     localStorage.setItem('ops_colaboradores', JSON.stringify(APP.colaboradores));
   }
 
@@ -5287,6 +5328,7 @@ function iniciarAutoSync() {
     if (!APP.logado) return;
     try {
       const prevFbCount = APP.feedbacks.length;
+      await loadSheetData('colaboradores');
       await loadSheetData('acoes');
       await loadSheetData('feedbacks');
       await loadSheetData('notificacoes');
