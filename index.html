@@ -4879,36 +4879,13 @@ function editarColaborador(id) {
   document.getElementById('modal-colaborador').classList.add('open');
 }
 
-async function excluirColaborador(id, nome) {
+function excluirColaborador(id, nome) {
   if (!confirm(`Excluir "${nome}"?\n\nOs feedbacks deste colaborador também serão removidos.`)) return;
   APP.colaboradores = APP.colaboradores.filter(x => x.id !== id);
-  APP.feedbacks     = APP.feedbacks.filter(x => x.colaboradorId !== id);
-  // Salva ID excluído — impede auto-sync de reverter enquanto Sheets não atualiza
-  try {
-    const excluidos = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
-    excluidos.push({ id, ts: Date.now() });
-    localStorage.setItem('ops_excluidos_colabs', JSON.stringify(excluidos));
-  } catch(e) {}
+  APP.feedbacks = APP.feedbacks.filter(x => x.colaboradorId !== id);
   saveToStorage();
   updateBadges();
   showToast(`${nome} removido`, 'success');
-  // Sincroniza com Sheets
-  if (APP.sheetUrl) {
-    const colRows = APP.colaboradores.map(c => [
-      c.id, c.nome, c.funcao, c.lider, c.admissao||'', c.turno||'',
-      c.foto||'', c.obs||'', c.senha||'', c.telefone||'', c.email||'', String(c.trocarSenha||false)
-    ]);
-    const fbRows = APP.feedbacks.map(f => [
-      f.id, f.colaboradorId, f.tipo, f.titulo, f.descricao||'',
-      'DATA:'+(f.data||''), f.satisfacao||'', f.acao||'', f.prazo||'', f.registradoPor||''
-    ]);
-    sheetsPost({ action: 'replace_all', sheet: 'colaboradores',
-      headers: ['ID','Nome','Funcao','Lider','Admissao','Turno','Foto','Obs','Senha','Telefone','Email','TrocarSenha'],
-      rows: colRows });
-    sheetsPost({ action: 'replace_all', sheet: 'feedbacks',
-      headers: ['ID','ColaboradorID','Tipo','Titulo','Descricao','Data','Satisfacao','Acao','Prazo','RegistradoPor'],
-      rows: fbRows });
-  }
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
 }
 
@@ -5006,13 +4983,21 @@ async function syncAllFromSheet() {
   if (!APP.sheetUrl) return;
   showSyncIndicator('syncing');
   try {
-    await Promise.all([
-      loadSheetData('colaboradores'),
+    // Colaboradores sincronizam apenas se não houver exclusões pendentes recentes
+    const _temExclusaoPendente = (() => {
+      try {
+        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+        return lista.some(e => Date.now() - e.ts < 30000); // 30s após exclusão, não sincroniza
+      } catch(e) { return false; }
+    })();
+    const syncTasks = [
       loadSheetData('feedbacks'),
       loadSheetData('acoes'),
       loadSheetData('usuarios'),
       loadSheetData('ponto'),
-    ]);
+    ];
+    if (!_temExclusaoPendente) syncTasks.push(loadSheetData('colaboradores'));
+    await Promise.all(syncTasks);
     showSyncIndicator('ok');
     updateBadges();
     // Re-render current page with fresh data
@@ -5042,15 +5027,6 @@ async function loadSheetData(sheetName) {
   const rows = data.slice(1); // skip header row
 
   if (sheetName === 'colaboradores') {
-    // Filtra IDs excluídos recentemente (evita auto-sync reverter exclusão pendente no Sheets)
-    const _excluidos = (() => {
-      try {
-        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
-        const validos = lista.filter(e => Date.now() - e.ts < 86400000); // 24h
-        if (validos.length !== lista.length) localStorage.setItem('ops_excluidos_colabs', JSON.stringify(validos));
-        return new Set(validos.map(e => e.id));
-      } catch(e) { return new Set(); }
-    })();
     APP.colaboradores = rows.map(r => ({
       id:          String(r[0]||''),
       nome:        String(r[1]||''),
@@ -5064,7 +5040,7 @@ async function loadSheetData(sheetName) {
       telefone:    r[9] ? String(r[9]) : null,
       email:       r[10] ? String(r[10]) : null,
       trocarSenha: String(r[11]||'') === 'true',
-    })).filter(c => c.id && c.nome && !_excluidos.has(c.id));
+    })).filter(c => c.id && c.nome);
     localStorage.setItem('ops_colaboradores', JSON.stringify(APP.colaboradores));
   }
 
@@ -5311,7 +5287,6 @@ function iniciarAutoSync() {
     if (!APP.logado) return;
     try {
       const prevFbCount = APP.feedbacks.length;
-      await loadSheetData('colaboradores');
       await loadSheetData('acoes');
       await loadSheetData('feedbacks');
       await loadSheetData('notificacoes');
