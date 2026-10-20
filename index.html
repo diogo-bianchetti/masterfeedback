@@ -1201,17 +1201,22 @@ async function init() {
     updateSheetStatus(true);
     setLoadingMsg('Carregando dados...');
     try {
-      // Timeout de 4s — resolve (não rejeita) para garantir que o sistema sempre avance
+      // Timeout de 4s — dados críticos para o login (sem ponto, que é grande)
       const timeoutPromise = new Promise(res => setTimeout(() => res('timeout'), 4000));
       const syncPromise = Promise.all([
         loadSheetData('colaboradores'),
         loadSheetData('feedbacks'),
         loadSheetData('acoes'),
         loadSheetData('usuarios'),
-        loadSheetData('ponto'),
       ]).then(() => 'ok').catch(() => 'error');
       const result = await Promise.race([syncPromise, timeoutPromise]);
       setLoadingMsg(result === 'ok' ? 'Pronto!' : 'Usando dados locais...');
+      // Ponto carrega em background após os dados críticos (é o maior, não bloqueia o login)
+      if (result === 'ok') {
+        loadSheetData('ponto').then(() => {
+          localStorage.setItem('ops_ponto', JSON.stringify(APP.pontoData));
+        }).catch(() => {});
+      }
     } catch(e) {
       console.warn('Pre-login sync error:', e.message);
       setLoadingMsg('Usando dados locais...');
@@ -2559,11 +2564,12 @@ function processFile(file) {
     if (APP.sheetUrl) {
       showToast('Sincronizando ponto com Sheets...', '');
       const headers = ['Nome','Data','DataBR','DiaSemana','Entrada1','Saida1','Entrada2','Saida2','Horas','Credito','Debito','Saldo','Status'];
+      const t = v => v ? 'H|' + v : ''; // prefixo H| evita Sheets converter HH:MM para hora com timezone
       const rows = data.map(p => [
         p.nome||'', p.data||'', p.dataBR||'', p.diaSemana||'',
-        p.entrada1||'', p.saida1||'', p.entrada2||'', p.saida2||'',
-        p.horas||'', p.credito||'', p.debito||'',
-        p.saldo ? 'SALDO:' + p.saldo : '', // prefix to prevent Sheets auto-converting
+        t(p.entrada1), t(p.saida1), t(p.entrada2), t(p.saida2),
+        t(p.horas), t(p.credito), t(p.debito),
+        p.saldo ? 'SALDO:' + p.saldo : '',
         p.status||''
       ]);
       sheetsPost({ action: 'replace_all', sheet: 'ponto', headers, rows }).then(() => {
@@ -2598,7 +2604,16 @@ function parseHHMM(str) {
   return parseInt(m[1]) + parseInt(m[2])/60;
 }
 
-function limparPonto() { APP.pontoData = []; saveToStorage(); navTo('ponto'); }
+function limparPonto() {
+  APP.pontoData = [];
+  saveToStorage();
+  if (APP.sheetUrl) {
+    sheetsPost({ action: 'replace_all', sheet: 'ponto',
+      headers: ['Nome','Data','DataBR','DiaSemana','Entrada1','Saida1','Entrada2','Saida2','Horas','Credito','Debito','Saldo','Status'],
+      rows: [] });
+  }
+  navTo('ponto');
+}
 
 // ======= RELATÓRIOS =======
 function renderRelatorios() {
@@ -4864,13 +4879,30 @@ function editarColaborador(id) {
   document.getElementById('modal-colaborador').classList.add('open');
 }
 
-function excluirColaborador(id, nome) {
+async function excluirColaborador(id, nome) {
   if (!confirm(`Excluir "${nome}"?\n\nOs feedbacks deste colaborador também serão removidos.`)) return;
   APP.colaboradores = APP.colaboradores.filter(x => x.id !== id);
-  APP.feedbacks = APP.feedbacks.filter(x => x.colaboradorId !== id);
+  APP.feedbacks     = APP.feedbacks.filter(x => x.colaboradorId !== id);
   saveToStorage();
   updateBadges();
   showToast(`${nome} removido`, 'success');
+  // Sincroniza exclusão com Sheets via replace_all — garante que o auto-sync não reverta
+  if (APP.sheetUrl) {
+    const colRows = APP.colaboradores.map(c => [
+      c.id, c.nome, c.funcao, c.lider, c.admissao||'', c.turno||'',
+      c.foto||'', c.obs||'', c.senha||'', c.telefone||'', c.email||'', String(c.trocarSenha||false)
+    ]);
+    const fbRows = APP.feedbacks.map(f => [
+      f.id, f.colaboradorId, f.tipo, f.titulo, f.descricao||'',
+      'DATA:'+(f.data||''), f.satisfacao||'', f.acao||'', f.prazo||'', f.registradoPor||''
+    ]);
+    await sheetsPost({ action: 'replace_all', sheet: 'colaboradores',
+      headers: ['ID','Nome','Funcao','Lider','Admissao','Turno','Foto','Obs','Senha','Telefone','Email','TrocarSenha'],
+      rows: colRows });
+    await sheetsPost({ action: 'replace_all', sheet: 'feedbacks',
+      headers: ['ID','ColaboradorID','Tipo','Titulo','Descricao','Data','Satisfacao','Acao','Prazo','RegistradoPor'],
+      rows: fbRows });
+  }
   renderPage(document.querySelector('.nav-item.active')?.dataset?.page || 'colaboradores');
 }
 
@@ -5107,16 +5139,30 @@ async function loadSheetData(sheetName) {
   }
 
   else if (sheetName === 'ponto') {
-    // Helper: clean Sheets ISO datetime → just the time HH:MM
+    // Se Sheets vier vazio (aba ponto sem dados), mantém dados locais — não apaga
+    if (!rows.length) return;
     function cleanTime(v) {
       if (!v) return '';
-      const s = String(v);
-      // ISO format: 1899-12-30T07:12:00.000Z → extract HH:MM
-      const mISO = s.match(/T(\d{2}:\d{2})/);
-      if (mISO) return mISO[1];
-      // Already HH:MM
-      const mHM = s.match(/^(\d{1,2}:\d{2})/);
-      if (mHM) return mHM[1];
+      const s = String(v).trim();
+      // Prefixo H| salvo para evitar conversão de timezone pelo Sheets/browser
+      if (s.startsWith('H|')) return s.slice(2);
+      if (s.startsWith('T:')) return s.slice(2); // compatibilidade com dados antigos
+      // Já está no formato HH:MM — retorna direto sem nenhuma conversão
+      if (/^\d{1,2}:\d{2}$/.test(s)) return s;
+      // ISO do Sheets: 1899-12-30T07:12:00.000Z
+      // IMPORTANTE: usar o valor numérico da fração de dia, não o T, pois
+      // browsers em timezone diferente convertem o .000Z para local.
+      // Detectar decimal (fração de dia) e converter sem timezone
+      const num = parseFloat(s);
+      if (!isNaN(num) && s.includes('.') && !s.includes(':')) {
+        const totalMin = Math.round(Math.abs(num) * 24 * 60);
+        const hh = String(Math.floor(totalMin / 60)).padStart(2,'0');
+        const mm = String(totalMin % 60).padStart(2,'0');
+        return hh + ':' + mm;
+      }
+      // Fallback: extrair apenas os dígitos HH:MM do string ISO ignorando timezone
+      const mRaw = s.match(/(\d{2}):(\d{2})(?::\d{2})?/);
+      if (mRaw) return mRaw[1] + ':' + mRaw[2];
       return s;
     }
     function cleanSaldo(v) {
@@ -5250,11 +5296,14 @@ function iniciarAutoSync() {
     if (!APP.logado) return;
     try {
       const prevFbCount = APP.feedbacks.length;
+      await loadSheetData('colaboradores');
       await loadSheetData('acoes');
       await loadSheetData('feedbacks');
       await loadSheetData('notificacoes');
       updateBadges();
       const page = document.querySelector('.nav-item.active')?.dataset?.page;
+      // Sincroniza ponto quando a aba estiver aberta (evita carregar 2500 linhas a cada 20s em background)
+      if (page === 'ponto') { await loadSheetData('ponto'); renderPage('ponto'); }
       // Only re-render if feedbacks changed (new ones arrived)
       const newFbCount = APP.feedbacks.length;
       if (newFbCount > prevFbCount) {
