@@ -5486,8 +5486,19 @@ function showToast(msg, type='') {
 // ======= STORAGE =======
 function saveToStorage() {
   try {
-    localStorage.setItem('ops_colaboradores', JSON.stringify(APP.colaboradores));
-    localStorage.setItem('ops_feedbacks', JSON.stringify(APP.feedbacks));
+    // Nunca salva colaboradores/feedbacks excluídos no localStorage
+    const _excSave = (() => {
+      try {
+        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+        return new Set(lista.map(e => typeof e === 'string' ? e : e.id));
+      } catch(e) { return new Set(); }
+    })();
+    localStorage.setItem('ops_colaboradores', JSON.stringify(
+      APP.colaboradores.filter(c => !_excSave.has(c.id))
+    ));
+    localStorage.setItem('ops_feedbacks', JSON.stringify(
+      APP.feedbacks.filter(f => !_excSave.has(f.colaboradorId))
+    ));
     localStorage.setItem('ops_acoes', JSON.stringify(APP.acoes));
     localStorage.setItem('ops_notifs', JSON.stringify(APP.notificacoes));
     if (APP.usuarios) localStorage.setItem('ops_usuarios', JSON.stringify(APP.usuarios));
@@ -5504,8 +5515,17 @@ function saveToStorage() {
 
 function loadFromStorage() {
   try {
-    APP.colaboradores = JSON.parse(localStorage.getItem('ops_colaboradores') || '[]');
-    APP.feedbacks = JSON.parse(localStorage.getItem('ops_feedbacks') || '[]');
+    // Aplica lista negra ao carregar — garante que excluídos nunca voltam do localStorage
+    const _excList = (() => {
+      try {
+        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+        return new Set(lista.map(e => typeof e === 'string' ? e : e.id));
+      } catch(e) { return new Set(); }
+    })();
+    APP.colaboradores = (JSON.parse(localStorage.getItem('ops_colaboradores') || '[]'))
+      .filter(c => !_excList.has(c.id));
+    APP.feedbacks = (JSON.parse(localStorage.getItem('ops_feedbacks') || '[]'))
+      .filter(f => !_excList.has(f.colaboradorId));
     APP.acoes = JSON.parse(localStorage.getItem('ops_acoes') || '[]');
     APP.notificacoes = JSON.parse(localStorage.getItem('ops_notifs') || '[]');
     APP.pontoData = JSON.parse(localStorage.getItem('ops_ponto') || '[]');
