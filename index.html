@@ -4883,10 +4883,16 @@ async function excluirColaborador(id, nome) {
   if (!confirm(`Excluir "${nome}"?\n\nOs feedbacks deste colaborador também serão removidos.`)) return;
   APP.colaboradores = APP.colaboradores.filter(x => x.id !== id);
   APP.feedbacks     = APP.feedbacks.filter(x => x.colaboradorId !== id);
+  // Salva ID excluído — impede auto-sync de reverter enquanto Sheets não atualiza
+  try {
+    const excluidos = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+    excluidos.push({ id, ts: Date.now() });
+    localStorage.setItem('ops_excluidos_colabs', JSON.stringify(excluidos));
+  } catch(e) {}
   saveToStorage();
   updateBadges();
   showToast(`${nome} removido`, 'success');
-  // Sincroniza exclusão com Sheets via replace_all — garante que o auto-sync não reverta
+  // Sincroniza com Sheets
   if (APP.sheetUrl) {
     const colRows = APP.colaboradores.map(c => [
       c.id, c.nome, c.funcao, c.lider, c.admissao||'', c.turno||'',
@@ -4896,10 +4902,10 @@ async function excluirColaborador(id, nome) {
       f.id, f.colaboradorId, f.tipo, f.titulo, f.descricao||'',
       'DATA:'+(f.data||''), f.satisfacao||'', f.acao||'', f.prazo||'', f.registradoPor||''
     ]);
-    await sheetsPost({ action: 'replace_all', sheet: 'colaboradores',
+    sheetsPost({ action: 'replace_all', sheet: 'colaboradores',
       headers: ['ID','Nome','Funcao','Lider','Admissao','Turno','Foto','Obs','Senha','Telefone','Email','TrocarSenha'],
       rows: colRows });
-    await sheetsPost({ action: 'replace_all', sheet: 'feedbacks',
+    sheetsPost({ action: 'replace_all', sheet: 'feedbacks',
       headers: ['ID','ColaboradorID','Tipo','Titulo','Descricao','Data','Satisfacao','Acao','Prazo','RegistradoPor'],
       rows: fbRows });
   }
@@ -5036,6 +5042,15 @@ async function loadSheetData(sheetName) {
   const rows = data.slice(1); // skip header row
 
   if (sheetName === 'colaboradores') {
+    // Filtra IDs excluídos recentemente (evita auto-sync reverter exclusão pendente no Sheets)
+    const _excluidos = (() => {
+      try {
+        const lista = JSON.parse(localStorage.getItem('ops_excluidos_colabs') || '[]');
+        const validos = lista.filter(e => Date.now() - e.ts < 86400000); // 24h
+        if (validos.length !== lista.length) localStorage.setItem('ops_excluidos_colabs', JSON.stringify(validos));
+        return new Set(validos.map(e => e.id));
+      } catch(e) { return new Set(); }
+    })();
     APP.colaboradores = rows.map(r => ({
       id:          String(r[0]||''),
       nome:        String(r[1]||''),
@@ -5049,7 +5064,7 @@ async function loadSheetData(sheetName) {
       telefone:    r[9] ? String(r[9]) : null,
       email:       r[10] ? String(r[10]) : null,
       trocarSenha: String(r[11]||'') === 'true',
-    })).filter(c => c.id && c.nome);
+    })).filter(c => c.id && c.nome && !_excluidos.has(c.id));
     localStorage.setItem('ops_colaboradores', JSON.stringify(APP.colaboradores));
   }
 
